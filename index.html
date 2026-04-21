@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Electron Browser - Brave Clone</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #1e1f2c;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .toolbar {
+      background: #2d2f3e;
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      border-bottom: 1px solid #3a3c4a;
+    }
+    .nav-buttons { display: flex; gap: 6px; }
+    .nav-btn {
+      background: #3a3c4e; border: none; color: #ddd; font-size: 18px;
+      width: 34px; height: 34px; border-radius: 8px; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .nav-btn:hover { background: #4c4f6e; color: white; }
+    .url-bar {
+      flex: 1; display: flex; gap: 8px; background: #1e1f2c;
+      border-radius: 32px; padding: 4px 12px; border: 1px solid #4c4f6e;
+    }
+    #urlInput {
+      flex: 1; background: transparent; border: none; color: #f0f0f0;
+      font-size: 15px; padding: 8px 4px; outline: none;
+    }
+    .go-btn {
+      background: #5f6eff; border: none; color: white; border-radius: 24px;
+      padding: 6px 18px; cursor: pointer;
+    }
+    .shield-area {
+      display: flex; align-items: center; gap: 12px;
+      background: #232433; padding: 4px 12px; border-radius: 30px;
+    }
+    .shield-btn {
+      background: none; border: none; color: #8c9eff; font-size: 18px;
+      cursor: pointer; display: flex; align-items: center; gap: 5px;
+    }
+    .shield-active { color: #4caf50; }
+    .badge { background: #3a3c4e; border-radius: 12px; padding: 2px 8px; font-size: 12px; }
+    .tabs-container {
+      background: #242533; display: flex; align-items: center;
+      overflow-x: auto; padding: 6px 8px; gap: 6px;
+    }
+    .tab {
+      background: #2f3142; color: #ccc; padding: 6px 14px;
+      border-radius: 12px 12px 8px 8px; display: inline-flex;
+      align-items: center; gap: 8px; cursor: pointer;
+      max-width: 200px;
+    }
+    .tab.active { background: #3d405b; color: white; border-bottom: 2px solid #8c9eff; }
+    .tab-title { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tab-close { background: none; border: none; color: #bbb; cursor: pointer; font-size: 16px; }
+    .new-tab-btn {
+      background: #5f6eff; border: none; color: white; font-size: 20px;
+      width: 32px; height: 32px; border-radius: 50%; cursor: pointer;
+    }
+    .webview-container { flex: 1; position: relative; background: #14151f; }
+    webview {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      display: none; border: none;
+    }
+    webview.active-webview { display: flex; }
+    .loading-overlay {
+      position: fixed; bottom: 20px; right: 20px;
+      background: #2d2f3ed9; backdrop-filter: blur(8px);
+      padding: 6px 14px; border-radius: 40px; font-size: 13px;
+      color: white; pointer-events: none; z-index: 200;
+    }
+  </style>
+</head>
+<body>
+<div class="toolbar">
+  <div class="nav-buttons">
+    <button class="nav-btn" id="backBtn">◀</button>
+    <button class="nav-btn" id="forwardBtn">▶</button>
+    <button class="nav-btn" id="reloadBtn">⟳</button>
+    <button class="nav-btn" id="stopBtn">⏹</button>
+  </div>
+  <div class="url-bar">
+    <input type="text" id="urlInput" placeholder="Search or type URL" spellcheck="false">
+    <button class="go-btn" id="goBtn">Go</button>
+  </div>
+  <div class="shield-area">
+    <button class="shield-btn" id="adblockToggleBtn">🛡️ <span id="shieldStatus">ON</span></button>
+    <span class="badge" id="blockedCount">0 blocked</span>
+  </div>
+</div>
+<div class="tabs-container" id="tabsContainer">
+  <button class="new-tab-btn" id="newTabBtn">+</button>
+</div>
+<div class="webview-container" id="webviewContainer"></div>
+<div class="loading-overlay" id="loadingIndicator">🌐 Ready</div>
+
+<script>
+  const { ipcRenderer } = require('electron');
+
+  // ---------- DOM elements ----------
+  const webviewContainer = document.getElementById('webviewContainer');
+  const tabsContainer = document.getElementById('tabsContainer');
+  const newTabBtn = document.getElementById('newTabBtn');
+  const backBtn = document.getElementById('backBtn');
+  const forwardBtn = document.getElementById('forwardBtn');
+  const reloadBtn = document.getElementById('reloadBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const goBtn = document.getElementById('goBtn');
+  const urlInput = document.getElementById('urlInput');
+  const adblockToggleBtn = document.getElementById('adblockToggleBtn');
+  const shieldStatusSpan = document.getElementById('shieldStatus');
+  const blockedCountSpan = document.getElementById('blockedCount');
+  const loadingIndicator = document.getElementById('loadingIndicator');
+
+  // ---------- State ----------
+  let webviews = new Map();   // tabId -> { webview, tabButton, titleSpan, url, loading }
+  let activeTabId = null;
+  let nextTabId = 1;
+  let adBlockEnabled = true;
+  let totalBlockedCount = 0;
+
+  // ---------- Helpers ----------
+  function setLoadingMessage(msg, isError = false) {
+    loadingIndicator.textContent = msg;
+    loadingIndicator.style.opacity = '0.9';
+    setTimeout(() => {
+      if (loadingIndicator.textContent === msg) loadingIndicator.style.opacity = '0.7';
+    }, 1500);
+  }
+
+  // Fix SEARCH: convert input to proper URL
+  function sanitizeUrl(input) {
+    let str = input.trim();
+    if (!str) return 'https://www.google.com';
+    // If it already starts with http:// or https://
+    if (/^https?:\/\//i.test(str)) return str;
+    // If it looks like a domain (contains dot and no spaces)
+    if (str.includes('.') && !str.includes(' ')) {
+      return 'https://' + str;
+    }
+    // Otherwise treat as search query (Google)
+    return `https://www.google.com/search?q=${encodeURIComponent(str)}`;
+  }
+
+  // Navigate active webview
+  function navigateTo(rawInput) {
+    const url = sanitizeUrl(rawInput);
+    const active = webviews.get(activeTabId);
+    if (active && active.webview) {
+      active.webview.src = url;
+      active.url = url;
+      urlInput.value = url;
+      setLoadingMessage(`Loading ${url}`);
+    }
+  }
+
+  // Update UI for adblock
+  function updateAdblockUI() {
+    shieldStatusSpan.innerText = adBlockEnabled ? 'ON' : 'OFF';
+    if (adBlockEnabled) adblockToggleBtn.classList.add('shield-active');
+    else adblockToggleBtn.classList.remove('shield-active');
+    ipcRenderer.send('toggle-adblock', adBlockEnabled);
+  }
+
+  // Create a new tab
+  function createTab(startUrl = 'https://www.google.com', activate = true) {
+    const tabId = nextTabId++;
+    const webview = document.createElement('webview');
+    webview.setAttribute('src', startUrl);
+    webview.setAttribute('allowpopups', 'false');
+    webview.setAttribute('partition', 'persist:tab-session');
+    webview.style.display = 'none';
+    webview.classList.add('webview-element');
+
+    // Tab UI
+    const tabButton = document.createElement('div');
+    tabButton.className = 'tab';
+    tabButton.setAttribute('data-tab-id', tabId);
+    const titleSpan = document.createElement('span');
+    titleSpan.className = 'tab-title';
+    titleSpan.innerText = 'New Tab';
+    const closeSpan = document.createElement('span');
+    closeSpan.className = 'tab-close';
+    closeSpan.innerHTML = '✕';
+    tabButton.appendChild(titleSpan);
+    tabButton.appendChild(closeSpan);
+    tabsContainer.insertBefore(tabButton, newTabBtn);
+
+    webviewContainer.appendChild(webview);
+
+    webviews.set(tabId, {
+      webview, tabButton, titleSpan,
+      url: startUrl, loading: false
+    });
+
+    // Webview events
+    webview.addEventListener('did-navigate', (e) => {
+      const data = webviews.get(tabId);
+      if (data && activeTabId === tabId) urlInput.value = e.url;
+      if (data) data.url = e.url;
+      updateTabTitle(tabId, webview.getTitle() || 'Loading...');
+    });
+    webview.addEventListener('did-navigate-in-page', (e) => {
+      const data = webviews.get(tabId);
+      if (data && activeTabId === tabId) urlInput.value = e.url;
+      if (data) data.url = e.url;
+    });
+    webview.addEventListener('page-title-updated', (e) => updateTabTitle(tabId, e.title));
+    webview.addEventListener('did-start-loading', () => {
+      const data = webviews.get(tabId);
+      if (data) data.loading = true;
+      if (activeTabId === tabId) setLoadingMessage('Loading...');
+    });
+    webview.addEventListener('did-stop-loading', () => {
+      const data = webviews.get(tabId);
+      if (data) data.loading = false;
+      if (activeTabId === tabId) setLoadingMessage('Ready');
+    });
+    webview.addEventListener('did-fail-load', (e) => {
+      if (activeTabId === tabId) setLoadingMessage(`Error: ${e.errorDescription}`, true);
+      updateTabTitle(tabId, 'Failed');
+    });
+
+    // Tab click to switch
+    tabButton.addEventListener('click', (e) => {
+      if (e.target !== closeSpan) switchToTab(tabId);
+    });
+    closeSpan.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeTab(tabId);
+    });
+
+    if (activate) switchToTab(tabId);
+    return tabId;
+  }
+
+  function switchToTab(tabId) {
+    if (!webviews.has(tabId)) return;
+    for (let [id, data] of webviews.entries()) {
+      data.webview.classList.remove('active-webview');
+      data.tabButton.classList.remove('active');
+    }
+    const active = webviews.get(tabId);
+    active.webview.classList.add('active-webview');
+    active.tabButton.classList.add('active');
+    activeTabId = tabId;
+    urlInput.value = active.url;
+    setLoadingMessage(active.loading ? 'Loading...' : 'Ready');
+  }
+
+  function closeTab(tabId) {
+    if (!webviews.has(tabId)) return;
+    const data = webviews.get(tabId);
+    data.webview.remove();
+    data.tabButton.remove();
+    webviews.delete(tabId);
+    if (webviews.size === 0) {
+      createTab('https://www.google.com', true);
+    } else if (activeTabId === tabId) {
+      const first = Array.from(webviews.keys())[0];
+      if (first) switchToTab(first);
+    }
+  }
+
+  function updateTabTitle(tabId, title) {
+    const data = webviews.get(tabId);
+    if (data && data.titleSpan) {
+      data.titleSpan.innerText = title?.substring(0, 25) || 'Untitled';
+    }
+  }
+
+  function getActiveWebview() {
+    return webviews.get(activeTabId)?.webview || null;
+  }
+
+  // ---------- Event listeners ----------
+  backBtn.addEventListener('click', () => {
+    const wv = getActiveWebview();
+    if (wv && wv.canGoBack && wv.canGoBack()) wv.goBack();
+    else setLoadingMessage('No back history', true);
+  });
+  forwardBtn.addEventListener('click', () => {
+    const wv = getActiveWebview();
+    if (wv && wv.canGoForward && wv.canGoForward()) wv.goForward();
+    else setLoadingMessage('No forward history', true);
+  });
+  reloadBtn.addEventListener('click', () => getActiveWebview()?.reload());
+  stopBtn.addEventListener('click', () => getActiveWebview()?.stop());
+  goBtn.addEventListener('click', () => navigateTo(urlInput.value));
+  urlInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') navigateTo(urlInput.value); });
+  newTabBtn.addEventListener('click', () => createTab('https://www.google.com', true));
+  adblockToggleBtn.addEventListener('click', () => {
+    adBlockEnabled = !adBlockEnabled;
+    updateAdblockUI();
+    setLoadingMessage(`Ad-blocker ${adBlockEnabled ? 'ON' : 'OFF'}`);
+  });
+
+  // IPC for blocked stats
+  ipcRenderer.on('update-blocked-stats', (event, count) => {
+    totalBlockedCount = count;
+    blockedCountSpan.innerText = `${totalBlockedCount} blocked`;
+  });
+  ipcRenderer.send('get-blocked-stats');
+
+  // Keyboard shortcut: Ctrl+L focus address bar
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
+      e.preventDefault();
+      urlInput.focus();
+      urlInput.select();
+    }
+  });
+
+  // Start with one tab
+  createTab('https://www.brave.com', true);
+  updateAdblockUI();
+</script>
+</body>
+</html>
